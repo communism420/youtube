@@ -10,36 +10,13 @@
 # SIDE PANELS ACCORDION - issue #4020
 --------------------------------------------------------------*/
 
-extension.features.sidePanels = function (anything) {
-	if (anything instanceof Event) {
-		return;
-	}
-
-	if (extension.storage.get('side_panels') !== 'collapsed') {
-		// Detach our interceptor so we don't fight YouTube when the feature is off.
-		window.removeEventListener('click', extension.features.sidePanels.handleClick, true);
-		window.removeEventListener('click', extension.features.sidePanels.handleHeaderClick, true);
-
-		document.documentElement.removeAttribute('it-side-panels');
-
-		var collapsed = document.querySelectorAll('#secondary #panels > [it-panel-collapsed], #playlist[it-panel-collapsed]');
-		for (var i = 0, l = collapsed.length; i < l; i++) {
-			collapsed[i].removeAttribute('it-panel-collapsed');
-		}
-		return;
-	}
-
+extension.features.sidePanels = function () {	if (extension.storage.get('side_panels') !== 'collapsed') {		return; 	}
 	document.documentElement.setAttribute('it-side-panels', 'collapsed');
-
 	window.addEventListener('click', extension.features.sidePanels.handleClick, true);
 	window.addEventListener('click', extension.features.sidePanels.handleHeaderClick, true);
 };
 
 extension.features.sidePanels.handleClick = function (event) {
-	if (extension.storage.get('side_panels') !== 'collapsed') {
-		return;
-	}
-
 	var target = event.target;
 	if (!target || !target.closest) return;
 
@@ -75,9 +52,6 @@ extension.features.sidePanels.handleClick = function (event) {
 };
 
 extension.features.sidePanels.handleHeaderClick = function (event) {
-	if (extension.storage.get('side_panels') !== 'collapsed') {
-		return;
-	}
 
 	var target = event.target;
 	if (!target || !target.closest) return;
