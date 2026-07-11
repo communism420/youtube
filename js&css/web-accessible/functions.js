@@ -487,8 +487,8 @@ ImprovedTube.initPlayer = function () {
 		ImprovedTube.expandDescription();
 		setTimeout(function () { ImprovedTube.forcedTheaterMode(); }, 150);
 		if (location.href.indexOf('/embed/') === -1) { ImprovedTube.miniPlayer(); }
-		if (ImprovedTube.storage.disable_auto_dubbing === true) { ImprovedTube.disableAutoDubbing(); }
-		if (ImprovedTube.storage.disable_auto_dubbing === true) { ImprovedTube.observeAutoDubbedMenu(); }
+		ImprovedTube.disableAutoDubbing();
+		ImprovedTube.observeAutoDubbedMenu();
 		if (ImprovedTube.storage.preferred_dubbing_language) { ImprovedTube.preferredDubbingLanguage(); }
 		if (ImprovedTube.storage.player_default_dubbed_language && ImprovedTube.storage.player_default_dubbed_language !== 'disabled') { ImprovedTube.selectDubbedLanguage(); }
 	}
