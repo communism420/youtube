@@ -516,9 +516,10 @@ document.addEventListener('it-message-from-extension', function () {
 					}
 					break
 				case 'disableAutoDubbing':
-					if (ImprovedTube.storage.disable_auto_dubbing === true) {
-						ImprovedTube.disableAutoDubbing();
-					}
+					ImprovedTube.disableAutoDubbing();
+					break
+				case 'hideAutoDubbedOptions':
+					ImprovedTube.observeAutoDubbedMenu();
 					break
 				case 'player_default_dubbed_language':
 					if (ImprovedTube.storage.player_default_dubbed_language && ImprovedTube.storage.player_default_dubbed_language !== 'disabled') {
