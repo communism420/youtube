@@ -45,7 +45,7 @@ function createContext(tracks) {
 		console,
 		clearInterval: () => {},
 		clearTimeout: () => {},
-		document: {querySelector: () => null},
+		document: {querySelector: () => null, querySelectorAll: () => []},
 		ImprovedTube: {
 			elements: {player},
 			storage: {
@@ -55,7 +55,20 @@ function createContext(tracks) {
 			}
 		},
 		location: {href: 'https://www.youtube.com/watch?v=test-video'},
-		MutationObserver: class { disconnect() {} observe() {} },
+		MutationObserver: class {
+			constructor(callback) {
+				this.callback = callback;
+			}
+
+			disconnect() {
+				this.disconnected = true;
+			}
+
+			observe(target, options) {
+				this.target = target;
+				this.options = options;
+			}
+		},
 		setInterval: () => 1,
 		setTimeout: callback => {
 			callback();
@@ -82,6 +95,11 @@ describe('dubbing policy', () => {
 		const humanRussian = audioTrack({id: 'ru.1', languageCode: 'ru', name: 'Russian'});
 		const autoRussian = audioTrack({id: 'ru.2', languageCode: 'ru', name: 'Russian', isAutoDubbed: true});
 		const {context, player, selectedTrack, setAudioTrackCalls} = createContext([original, humanRussian, autoRussian]);
+		context.ImprovedTube.autoDubbedTrackLabels = {
+			url: context.location.href,
+			values: new Set(['russian']),
+			manualValues: new Set(['russian'])
+		};
 
 		context.ImprovedTube.selectPermittedAudioTrack(player);
 		context.ImprovedTube.selectPermittedAudioTrack(player);
@@ -150,15 +168,19 @@ describe('dubbing policy', () => {
 		const autoHeader = menuItem('Автоматическое дублирование', true);
 		const autoRussian = menuItem('Russian');
 		const items = [humanHeader, humanRussian, autoHeader, autoRussian];
+		const popup = {
+			getBoundingClientRect: () => ({bottom: 180, height: 180, left: 0, right: 220, top: 0, width: 220})
+		};
 		const panel = {
-			closest: () => null,
+			closest: selector => selector === '.ytp-settings-menu' ? popup : null,
 			dataset: {},
+			getBoundingClientRect: () => ({bottom: 180, height: 180, left: 0, right: 220, top: 0, width: 220}),
 			offsetWidth: 220,
 			querySelectorAll: () => items,
 			style: createStyle()
 		};
 
-		context.document.querySelector = () => panel;
+		context.document.querySelectorAll = selector => selector === '.ytp-settings-menu .ytp-panel-menu' ? [panel] : [];
 		context.ImprovedTube.storage.hide_auto_dubbed_options = true;
 		context.ImprovedTube.hideAutoDubbedMenuItems();
 
@@ -168,6 +190,10 @@ describe('dubbing policy', () => {
 		expect(humanRussian.style.display).toBe('');
 		expect(autoHeader.style.display).toBe('none');
 		expect(autoRussian.style.display).toBe('none');
+		expect(autoHeader.style.getPropertyPriority('display')).toBe('important');
+		expect(autoRussian.style.getPropertyPriority('display')).toBe('important');
+		expect(context.ImprovedTube.autoDubbedTrackLabels.manualValues.has('russian')).toBe(true);
+		expect(context.ImprovedTube.autoDubbedTrackLabels.values.has('russian')).toBe(true);
 		// Never put fit-content on the inner menu: its footer can make the panel
 		// wider than YouTube's normal audio-track menu.
 		expect(panel.style.width).toBe(undefined);
@@ -177,7 +203,77 @@ describe('dubbing policy', () => {
 		expect(panel.style.width).toBe(undefined);
 	});
 
-	test('uses the native width of a filtered panel copy instead of the pre-filter width', () => {
+	test('watches menu layout classes and styles for late first-open changes', () => {
+		const {context} = createContext([]);
+		const playerContainer = {};
+		let hideCalls = 0;
+		context.document.querySelector = selector => selector === '#movie_player' ? playerContainer : null;
+		context.ImprovedTube.storage.hide_auto_dubbed_options = true;
+		context.ImprovedTube.hideAutoDubbedMenuItems = () => {
+			hideCalls++;
+		};
+
+		context.ImprovedTube.observeAutoDubbedMenu();
+		const observer = context.ImprovedTube.autoDubbedMenuObserver;
+
+		expect(observer.target).toBe(playerContainer);
+		expect(observer.options).toEqual({
+			attributeFilter: ['class', 'style'],
+			attributes: true,
+			childList: true,
+			subtree: true
+		});
+		expect(hideCalls).toBe(1);
+
+		observer.callback([{
+			type: 'attributes',
+			target: {classList: {contains: value => value === 'ytp-panel'}}
+		}]);
+		expect(hideCalls).toBe(2);
+
+		observer.callback([{
+			type: 'attributes',
+			target: {classList: {contains: value => value === 'ytp-progress-bar'}}
+		}]);
+		expect(hideCalls).toBe(2);
+	});
+
+	test('selects the active audio panel instead of the first settings panel', () => {
+		const {context} = createContext([]);
+		const menuItem = (textContent, isSectionHeader = false) => ({
+			classList: {contains: value => isSectionHeader && value === 'ytp-menuitem-section-header'},
+			textContent
+		});
+		const rootPanel = {
+			querySelectorAll: () => [menuItem('Quality')]
+		};
+		const popup = {
+			getBoundingClientRect: () => ({bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300})
+		};
+		let audioRect = {bottom: 200, height: 200, left: 300, right: 600, top: 0, width: 300};
+		const audioLayoutPanel = {
+			closest: selector => selector === '.ytp-settings-menu' ? popup : null,
+			getBoundingClientRect: () => audioRect
+		};
+		const audioPanel = {
+			closest: selector => {
+				if (selector === '.ytp-panel') return audioLayoutPanel;
+				if (selector === '.ytp-settings-menu') return popup;
+				return null;
+			},
+			// The stale inner table can still overlap the popup; visibility must be
+			// decided from the transformed outer panel instead.
+			getBoundingClientRect: () => ({bottom: 400, height: 400, left: 0, right: 300, top: 0, width: 300}),
+			querySelectorAll: () => [menuItem('Автоматическое дублирование', true), menuItem('Russian')]
+		};
+		context.document.querySelectorAll = () => [rootPanel, audioPanel];
+
+		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
+		audioRect = {bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300};
+		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBe(audioPanel);
+	});
+
+	test('uses the native size of a filtered panel copy instead of the first-open size', () => {
 		const {context} = createContext([]);
 		const createStyle = () => {
 			const values = {};
@@ -196,24 +292,38 @@ describe('dubbing policy', () => {
 			};
 		};
 
-		const menuPanel = {dataset: {}, style: createStyle()};
+		const menuPanelStyle = createStyle();
+		let menuPanelScrollTop = 120;
+		const menuPanel = {dataset: {}, style: menuPanelStyle};
+		Object.defineProperty(menuPanel, 'scrollTop', {
+			get() {
+				return menuPanelScrollTop;
+			},
+			set(value) {
+				// Model overflow: clip: it is not a scroll container, so the stale
+				// offset must be cleared before clip is applied.
+				if (menuPanelStyle.getPropertyValue('overflow') !== 'clip') menuPanelScrollTop = value;
+			}
+		});
 		const probeMenu = {style: createStyle()};
 		const probePanel = {
+			clientHeight: 176,
+			scrollHeight: 176,
 			style: createStyle(),
-			getBoundingClientRect: () => ({width: 213})
+			getBoundingClientRect: () => ({height: 161, width: 213})
 		};
 		const probe = {
 			dataset: {},
 			style: createStyle(),
 			matches: () => false,
-			getBoundingClientRect: () => ({width: 228}),
+			getBoundingClientRect: () => ({height: 176, width: 228}),
 			querySelector: selector => selector === '.ytp-panel' ? probePanel : probeMenu,
 			querySelectorAll: () => [],
 			remove() {
 				this.removed = true;
 			}
 		};
-		const popup = {dataset: {}, style: createStyle(), cloneNode: () => probe};
+		const popup = {dataset: {}, scrollTop: 60, style: createStyle(), cloneNode: () => probe};
 		const player = {
 			appendChild: node => {
 				player.appended = node;
@@ -221,7 +331,9 @@ describe('dubbing policy', () => {
 		};
 		const panel = {
 			dataset: {},
+			scrollTop: 240,
 			style: createStyle(),
+			querySelector: selector => selector === '[data-it-auto-dubbed-hidden="true"]' ? {} : null,
 			closest: selector => {
 				if (selector === '.ytp-panel') return menuPanel;
 				if (selector === '.html5-video-player, #movie_player') return player;
@@ -229,8 +341,14 @@ describe('dubbing policy', () => {
 			}
 		};
 		menuPanel.closest = selector => ['.ytp-popup', '.ytp-settings-menu'].includes(selector) ? popup : null;
+		panel.style.setProperty('height', '352px');
+		panel.style.setProperty('min-height', '352px');
+		panel.style.setProperty('max-height', '352px');
+		panel.style.setProperty('overflow', 'auto');
+		panel.style.setProperty('overflow-x', 'auto');
+		panel.style.setProperty('overflow-y', 'auto');
 
-		context.ImprovedTube.applyFilteredAudioMenuWidth(panel);
+		context.ImprovedTube.applyFilteredAudioMenuLayout(panel);
 
 		expect(player.appended).toBe(probe);
 		expect(probe.removed).toBe(true);
@@ -238,13 +356,82 @@ describe('dubbing policy', () => {
 		expect(menuPanel.style.getPropertyValue('width')).toBe('228px');
 		expect(menuPanel.style.getPropertyValue('min-width')).toBe('228px');
 		expect(menuPanel.style.getPropertyValue('max-width')).toBe('228px');
+		expect(menuPanel.style.getPropertyValue('height')).toBe('176px');
+		expect(menuPanel.style.getPropertyValue('min-height')).toBe('176px');
+		expect(menuPanel.style.getPropertyValue('max-height')).toBe('176px');
 		expect(menuPanel.style.getPropertyPriority('width')).toBe('important');
+		expect(menuPanel.style.getPropertyPriority('height')).toBe('important');
 		expect(popup.style.getPropertyValue('width')).toBe('228px');
 		expect(popup.style.getPropertyValue('min-width')).toBe('228px');
 		expect(popup.style.getPropertyValue('max-width')).toBe('228px');
+		expect(popup.style.getPropertyValue('height')).toBe('176px');
+		expect(popup.style.getPropertyValue('min-height')).toBe('176px');
+		expect(popup.style.getPropertyValue('max-height')).toBe('176px');
+		expect(menuPanel.style.getPropertyValue('overflow')).toBe('clip');
+		expect(menuPanel.style.getPropertyValue('overflow-x')).toBe('clip');
+		expect(menuPanel.style.getPropertyValue('overflow-y')).toBe('clip');
+		expect(menuPanel.style.getPropertyPriority('overflow-y')).toBe('important');
+		expect(menuPanel.scrollTop).toBe(0);
+		expect(panel.style.getPropertyValue('height')).toBe('auto');
+		expect(panel.style.getPropertyValue('min-height')).toBe('0px');
+		expect(panel.style.getPropertyValue('max-height')).toBe('none');
+		expect(panel.style.getPropertyValue('overflow')).toBe('visible');
+		expect(panel.style.getPropertyValue('overflow-y')).toBe('visible');
 
+		const delayedCallbacks = [];
+		context.setTimeout = callback => {
+			delayedCallbacks.push(callback);
+			return delayedCallbacks.length;
+		};
+		context.clearTimeout = () => {};
+		context.ImprovedTube.storage.hide_auto_dubbed_options = true;
+		context.ImprovedTube.refreshAutoDubbedMenuLayout(panel);
+		expect(panel.scrollTop).toBe(0);
+		expect(menuPanel.scrollTop).toBe(0);
+		expect(popup.scrollTop).toBe(0);
+
+		// YouTube can overwrite the first size and restore the obsolete scroll
+		// offset after our first animation frame.
+		menuPanel.style.setProperty('height', '352px');
+		popup.style.setProperty('height', '352px');
+		panel.scrollTop = 240;
+		menuPanel.scrollTop = 120;
+		popup.scrollTop = 60;
+		delayedCallbacks.forEach(callback => callback());
+		expect(menuPanel.style.getPropertyValue('height')).toBe('176px');
+		expect(popup.style.getPropertyValue('height')).toBe('176px');
+		expect(panel.scrollTop).toBe(0);
+		expect(menuPanel.scrollTop).toBe(0);
+		expect(popup.scrollTop).toBe(0);
+
+		// When navigating back, keep dimensions that YouTube has already replaced
+		// for the root settings menu while removing our remaining constraints.
+		menuPanel.style.setProperty('width', '340px');
+		popup.style.setProperty('width', '340px');
 		context.ImprovedTube.restoreAutoDubbedMenuLayout(panel);
-		expect(menuPanel.style.getPropertyValue('width')).toBe('');
-		expect(popup.style.getPropertyValue('width')).toBe('');
+		expect(menuPanel.style.getPropertyValue('width')).toBe('340px');
+		expect(menuPanel.style.getPropertyValue('min-width')).toBe('');
+		expect(menuPanel.style.getPropertyValue('max-width')).toBe('');
+		expect(menuPanel.style.getPropertyValue('height')).toBe('');
+		expect(popup.style.getPropertyValue('width')).toBe('340px');
+		expect(popup.style.getPropertyValue('min-width')).toBe('');
+		expect(popup.style.getPropertyValue('max-width')).toBe('');
+		expect(popup.style.getPropertyValue('height')).toBe('');
+		expect(menuPanel.style.getPropertyValue('overflow')).toBe('');
+		expect(menuPanel.style.getPropertyValue('overflow-x')).toBe('');
+		expect(menuPanel.style.getPropertyValue('overflow-y')).toBe('');
+		expect(panel.style.getPropertyValue('height')).toBe('352px');
+		expect(panel.style.getPropertyValue('min-height')).toBe('352px');
+		expect(panel.style.getPropertyValue('max-height')).toBe('352px');
+		expect(panel.style.getPropertyValue('overflow')).toBe('auto');
+		expect(panel.style.getPropertyValue('overflow-x')).toBe('auto');
+		expect(panel.style.getPropertyValue('overflow-y')).toBe('auto');
+
+		// Keep native scrolling when the remaining human-made track list is
+		// genuinely taller than the available panel viewport.
+		probePanel.scrollHeight = 320;
+		context.ImprovedTube.applyFilteredAudioMenuLayout(panel);
+		expect(menuPanel.style.getPropertyValue('overflow')).toBe('');
+		expect(menuPanel.style.getPropertyValue('overflow-y')).toBe('');
 	});
 });

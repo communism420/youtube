@@ -2162,7 +2162,15 @@ ImprovedTube.audioTrackIsAutoDubbed = function (track) {
 	const autoLabels = this.autoDubbedTrackLabels;
 	const name = this.normalizeAudioTrackText(info.name || track?.languageName);
 	if (autoLabels && autoLabels.url === location.href && name) {
-		return Array.from(autoLabels.values).some(label => label === name || label.startsWith(name + ' ') || label.includes(name + ' auto'));
+		const labelMatchesTrack = label => label === name || label.startsWith(name + ' ') || label.includes(name + ' auto');
+		const appearsInAutoSection = Array.from(autoLabels.values).some(labelMatchesTrack);
+		const appearsInManualSection = Array.from(autoLabels.manualValues || []).some(labelMatchesTrack);
+
+		// A human dub and an automatic dub can have exactly the same visible
+		// language label. Menu text alone cannot identify which track object is
+		// automatic in that case, so preserve the human track unless the metadata
+		// checks above provided unambiguous auto-dub evidence.
+		return appearsInAutoSection && !appearsInManualSection;
 	}
 
 	return false;
@@ -2310,6 +2318,7 @@ ImprovedTube.observeAutoDubbedMenu = function () {
 	if (ImprovedTube.storage.hide_auto_dubbed_options !== true) {
 		state?.disconnect();
 		ImprovedTube.autoDubbedMenuObserver = null;
+		ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
 		ImprovedTube.hideAutoDubbedMenuItems();
 		return;
 	}
@@ -2323,16 +2332,30 @@ ImprovedTube.observeAutoDubbedMenu = function () {
 	if (!playerContainer) return;
 
 	ImprovedTube.autoDubbedMenuObserver = new MutationObserver(function (records) {
-		// Width probes are mounted under the player briefly.  They are not a
+		// Layout probes are mounted under the player briefly. They are not a
 		// YouTube menu update and must not schedule another probe recursively.
-		if (records?.length && records.every(function (record) {
+		const relevantUpdate = records?.some(function (record) {
+			if (record.type === 'attributes') {
+				const target = record.target;
+				return target?.dataset?.itAutoDubbedHidden === 'true' ||
+					target?.classList?.contains('ytp-panel') ||
+					target?.classList?.contains('ytp-panel-menu') ||
+					target?.classList?.contains('ytp-settings-menu');
+			}
+
 			const nodes = Array.from(record.addedNodes || []).concat(Array.from(record.removedNodes || []));
-			return nodes.length > 0 && nodes.every(ImprovedTube.isAutoDubbedMenuLayoutProbe);
-		})) return;
+			return nodes.length === 0 || !nodes.every(ImprovedTube.isAutoDubbedMenuLayoutProbe);
+		});
+		if (!relevantUpdate) return;
 
 		ImprovedTube.hideAutoDubbedMenuItems();
 	});
-	ImprovedTube.autoDubbedMenuObserver.observe(playerContainer, { childList: true, subtree: true });
+	ImprovedTube.autoDubbedMenuObserver.observe(playerContainer, {
+		attributeFilter: ['class', 'style'],
+		attributes: true,
+		childList: true,
+		subtree: true
+	});
 	ImprovedTube.hideAutoDubbedMenuItems();
 };
 
@@ -2343,16 +2366,22 @@ ImprovedTube.isAutoDubbedMenuHeader = function (item) {
 
 ImprovedTube.rememberAutoDubbedMenuItems = function (items) {
 	if (!this.autoDubbedTrackLabels || this.autoDubbedTrackLabels.url !== location.href) {
-		this.autoDubbedTrackLabels = {url: location.href, values: new Set()};
+		this.autoDubbedTrackLabels = {url: location.href, values: new Set(), manualValues: new Set()};
 	}
 
 	let inAutoDubbedSection = false;
 	items.forEach(item => {
 		if (item.classList.contains('ytp-menuitem-section-header')) {
 			inAutoDubbedSection = this.isAutoDubbedMenuHeader(item);
-		} else if (inAutoDubbedSection) {
+		} else {
 			const label = this.normalizeAudioTrackText(item.textContent);
-			if (label) this.autoDubbedTrackLabels.values.add(label);
+			if (!label) return;
+
+			if (inAutoDubbedSection) {
+				this.autoDubbedTrackLabels.values.add(label);
+			} else {
+				this.autoDubbedTrackLabels.manualValues.add(label);
+			}
 		}
 	});
 };
@@ -2375,8 +2404,15 @@ ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
 
 		try {
 			const styles = JSON.parse(saved);
+			const applied = JSON.parse(element.dataset.itAutoDubbedMenuAppliedLayout || 'null');
 			for (const property in styles) {
 				const value = styles[property];
+				const appliedValue = applied?.[property];
+				if (appliedValue && (
+					element.style.getPropertyValue(property) !== appliedValue.value ||
+					element.style.getPropertyPriority(property) !== appliedValue.priority
+				)) continue;
+
 				if (value.value) {
 					element.style.setProperty(property, value.value, value.priority);
 				} else {
@@ -2384,20 +2420,52 @@ ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
 				}
 			}
 		} catch (_) {
-			element.style.removeProperty('width');
-			element.style.removeProperty('min-width');
-			element.style.removeProperty('max-width');
+			for (const property of [
+				'width', 'min-width', 'max-width',
+				'height', 'min-height', 'max-height',
+				'overflow', 'overflow-x', 'overflow-y'
+			]) {
+				element.style.removeProperty(property);
+			}
 		}
 
 		delete element.dataset.itAutoDubbedMenuLayout;
+		delete element.dataset.itAutoDubbedMenuAppliedLayout;
 	});
+};
+
+ImprovedTube.restoreAutoDubbedMenuLayoutProperties = function (element, properties) {
+	const saved = element?.dataset?.itAutoDubbedMenuLayout;
+	if (!saved) return;
+
+	try {
+		const styles = JSON.parse(saved);
+		properties.forEach(function (property) {
+			const value = styles[property];
+			if (!value) return;
+
+			const currentValue = element.style.getPropertyValue(property);
+			const currentPriority = element.style.getPropertyPriority(property);
+			if (currentValue === value.value && currentPriority === value.priority) return;
+
+			if (value.value) {
+				element.style.setProperty(property, value.value, value.priority);
+			} else {
+				element.style.removeProperty(property);
+			}
+		});
+	} catch (_) { }
 };
 
 ImprovedTube.saveAutoDubbedMenuLayout = function (element) {
 	if (!element || element.dataset.itAutoDubbedMenuLayout) return;
 
 	const savedStyles = {};
-	for (const property of ['width', 'min-width', 'max-width']) {
+	for (const property of [
+		'width', 'min-width', 'max-width',
+		'height', 'min-height', 'max-height',
+		'overflow', 'overflow-x', 'overflow-y'
+	]) {
 		savedStyles[property] = {
 			value: element.style.getPropertyValue(property),
 			priority: element.style.getPropertyPriority(property)
@@ -2407,16 +2475,48 @@ ImprovedTube.saveAutoDubbedMenuLayout = function (element) {
 	element.dataset.itAutoDubbedMenuLayout = JSON.stringify(savedStyles);
 };
 
-ImprovedTube.measureFilteredAudioMenuWidth = function (panel) {
+ImprovedTube.saveAutoDubbedMenuAppliedLayout = function (element) {
+	if (!element) return;
+
+	const appliedStyles = {};
+	for (const property of [
+		'width', 'min-width', 'max-width',
+		'height', 'min-height', 'max-height',
+		'overflow', 'overflow-x', 'overflow-y'
+	]) {
+		appliedStyles[property] = {
+			value: element.style.getPropertyValue(property),
+			priority: element.style.getPropertyPriority(property)
+		};
+	}
+
+	element.dataset.itAutoDubbedMenuAppliedLayout = JSON.stringify(appliedStyles);
+};
+
+ImprovedTube.measureFilteredAudioMenuLayout = function (panel) {
 	const player = panel?.closest?.('.html5-video-player, #movie_player');
 	const menuPanel = panel?.closest?.('.ytp-panel');
 	const popup = menuPanel?.closest?.('.ytp-popup') || menuPanel;
-	if (!player || !popup?.cloneNode || !player.appendChild) return 0;
+	if (!player || !popup?.cloneNode || !player.appendChild) return null;
 
-	const probe = popup.cloneNode(true);
-	const probePanel = probe.matches?.('.ytp-panel') ? probe : probe.querySelector?.('.ytp-panel');
-	const probeMenu = probe.matches?.('.ytp-panel-menu') ? probe : probe.querySelector?.('.ytp-panel-menu');
-	if (!probePanel || !probeMenu) return 0;
+	// A settings popup can contain more than one panel while YouTube animates
+	// between menus. Mark the live audio panel so its exact clone can be found.
+	panel.dataset.itAutoDubbedMenuSource = 'true';
+	let probe;
+	try {
+		probe = popup.cloneNode(true);
+	} catch (_) {
+		return null;
+	} finally {
+		delete panel.dataset.itAutoDubbedMenuSource;
+	}
+
+	const probeMenu = probe.querySelector?.('[data-it-auto-dubbed-menu-source="true"]') ||
+		(probe.matches?.('.ytp-panel-menu') ? probe : probe.querySelector?.('.ytp-panel-menu'));
+	const probePanel = probeMenu?.closest?.('.ytp-panel') ||
+		(probe.matches?.('.ytp-panel') ? probe : probe.querySelector?.('.ytp-panel'));
+	if (!probePanel || !probeMenu) return null;
+	if (probeMenu.dataset) delete probeMenu.dataset.itAutoDubbedMenuSource;
 
 	probe.dataset.itAutoDubbedMenuLayoutProbe = 'true';
 	probe.querySelectorAll?.('[data-it-auto-dubbed-hidden="true"]').forEach(function (item) {
@@ -2424,10 +2524,14 @@ ImprovedTube.measureFilteredAudioMenuWidth = function (panel) {
 	});
 
 	// This is a real copy of YouTube's panel, in the same player and with only
-	// the hidden section removed.  Its width is therefore the exact native
-	// width YouTube would use after the menu is closed and opened again.
+	// the hidden section removed. Its natural size is therefore the size YouTube
+	// would calculate after the menu is closed and opened again.
 	[probe, probePanel, probeMenu].forEach(function (element) {
-		for (const property of ['width', 'min-width', 'max-width', 'left', 'right']) {
+		for (const property of [
+			'width', 'min-width', 'max-width',
+			'height', 'min-height', 'max-height',
+			'left', 'right'
+		]) {
 			element.style.removeProperty(property);
 		}
 	});
@@ -2440,36 +2544,122 @@ ImprovedTube.measureFilteredAudioMenuWidth = function (panel) {
 	probe.style.setProperty('right', 'auto', 'important');
 	probe.style.setProperty('bottom', 'auto', 'important');
 	probe.style.setProperty('top', '0', 'important');
+	probe.style.setProperty('transform', 'none', 'important');
+	probe.style.setProperty('transition', 'none', 'important');
 	probePanel.style.setProperty('display', 'block', 'important');
+	probePanel.style.setProperty('transform', 'none', 'important');
+	probePanel.style.setProperty('transition', 'none', 'important');
 	probeMenu.style.setProperty('display', 'block', 'important');
+	probeMenu.style.setProperty('transform', 'none', 'important');
+	probeMenu.style.setProperty('transition', 'none', 'important');
 
 	try {
 		player.appendChild(probe);
-		// YouTube keeps the calculated width on both .ytp-panel and its parent
-		// .ytp-settings-menu.  The parent is the visible box, so measure it first.
-		const width = probe.getBoundingClientRect?.().width || probe.offsetWidth || probePanel.getBoundingClientRect?.().width || probePanel.offsetWidth;
-		return Number.isFinite(width) && width > 0 ? Math.ceil(width) : 0;
+		const probeRect = probe.getBoundingClientRect?.() || {};
+		const panelRect = probePanel.getBoundingClientRect?.() || {};
+		const width = probeRect.width || probe.offsetWidth || panelRect.width || probePanel.offsetWidth;
+		const height = probeRect.height || probe.offsetHeight || probe.scrollHeight ||
+			panelRect.height || probePanel.offsetHeight || probePanel.scrollHeight ||
+			probeMenu.offsetHeight || probeMenu.scrollHeight;
+		// .ytp-panel, not .ytp-panel-menu, is YouTube's actual overflow-y
+		// container. Detect whether the remaining native panel really needs it.
+		const menuClientHeight = probePanel.clientHeight || probePanel.offsetHeight || 0;
+		const menuScrollHeight = probePanel.scrollHeight || menuClientHeight;
+
+		return {
+			height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : 0,
+			scrollable: menuClientHeight > 0 && menuScrollHeight > menuClientHeight + 1,
+			width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : 0
+		};
 	} catch (_) {
-		return 0;
+		return null;
 	} finally {
 		probe.remove?.() || probe.parentNode?.removeChild(probe);
 	}
 };
 
-ImprovedTube.applyFilteredAudioMenuWidth = function (panel) {
+ImprovedTube.applyFilteredAudioMenuLayout = function (panel) {
 	const menuPanel = panel?.closest?.('.ytp-panel');
 	const settingsMenu = menuPanel?.closest?.('.ytp-settings-menu');
-	const width = this.measureFilteredAudioMenuWidth(panel);
-	if (!menuPanel || !width) return;
+	// Clear YouTube's old offset while .ytp-panel is still scrollable. Once
+	// overflow becomes `clip`, scrollTop can no longer be changed reliably.
+	this.resetFilteredAudioMenuScroll(panel);
+	const layout = this.measureFilteredAudioMenuLayout(panel);
+	if (!menuPanel || !layout || (!layout.width && !layout.height)) return;
 
-	// On current YouTube both elements receive an inline pixel width.  Updating
-	// only .ytp-panel leaves .ytp-settings-menu at its old, pre-filter width.
-	// Keep the two boxes in sync with the filtered native measurement.
+	// The inner table can retain the height and overflow of the unfiltered audio
+	// list even after its rows are hidden. That stale box is what leaves the
+	// first opening blank/scrolled; let the filtered rows define it naturally.
+	ImprovedTube.saveAutoDubbedMenuLayout(panel);
+	for (const [property, value] of [
+		['height', 'auto'],
+		['min-height', '0px'],
+		['max-height', 'none'],
+		['overflow', 'visible'],
+		['overflow-x', 'visible'],
+		['overflow-y', 'visible']
+	]) {
+		if (panel.style.getPropertyValue(property) !== value || panel.style.getPropertyPriority(property) !== 'important') {
+			panel.style.setProperty(property, value, 'important');
+		}
+	}
+
+	// YouTube writes the calculated dimensions to both elements. Updating only
+	// .ytp-panel leaves the visible .ytp-settings-menu at its pre-filter size.
 	[menuPanel, settingsMenu].filter(Boolean).forEach(function (element) {
 		ImprovedTube.saveAutoDubbedMenuLayout(element);
-		element.style.setProperty('width', width + 'px', 'important');
-		element.style.setProperty('min-width', width + 'px', 'important');
-		element.style.setProperty('max-width', width + 'px', 'important');
+
+		for (const property of ['width', 'min-width', 'max-width']) {
+			const value = layout.width ? layout.width + 'px' : '';
+			if (value && (element.style.getPropertyValue(property) !== value || element.style.getPropertyPriority(property) !== 'important')) {
+				element.style.setProperty(property, value, 'important');
+			}
+		}
+		for (const property of ['height', 'min-height', 'max-height']) {
+			const value = layout.height ? layout.height + 'px' : '';
+			if (value && (element.style.getPropertyValue(property) !== value || element.style.getPropertyPriority(property) !== 'important')) {
+				element.style.setProperty(property, value, 'important');
+			}
+		}
+	});
+
+	// Disable scrolling on the actual .ytp-panel when all remaining manual
+	// tracks fit. `clip` prevents both a scrollbar and YouTube's later
+	// scrollIntoView() from restoring the offset of the hidden auto-dub track.
+	if (layout.scrollable) {
+		ImprovedTube.restoreAutoDubbedMenuLayoutProperties(menuPanel, ['overflow', 'overflow-x', 'overflow-y']);
+	} else {
+		for (const property of ['overflow', 'overflow-x', 'overflow-y']) {
+			if (menuPanel.style.getPropertyValue(property) !== 'clip' || menuPanel.style.getPropertyPriority(property) !== 'important') {
+				menuPanel.style.setProperty(property, 'clip', 'important');
+			}
+		}
+	}
+
+	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(ImprovedTube.saveAutoDubbedMenuAppliedLayout);
+};
+
+ImprovedTube.cancelAutoDubbedMenuLayoutRefresh = function () {
+	const job = this.autoDubbedMenuLayoutJob;
+	if (!job) return;
+
+	const cancelFrame = window.cancelAnimationFrame?.bind(window) || clearTimeout;
+	if (job.frame) cancelFrame(job.frame);
+	job.timers.forEach(clearTimeout);
+	this.autoDubbedMenuLayoutJob = null;
+};
+
+ImprovedTube.resetFilteredAudioMenuScroll = function (panel) {
+	const menuPanel = panel?.closest?.('.ytp-panel');
+	const settingsMenu = menuPanel?.closest?.('.ytp-settings-menu');
+
+	// On the first opening YouTube scrolls to the selected auto-dubbed item
+	// before that section is hidden. The shortened menu then keeps this obsolete
+	// scroll offset and appears blank until it is closed and opened again.
+	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(function (element) {
+		if (typeof element.scrollTop === 'number' && element.scrollTop !== 0) {
+			element.scrollTop = 0;
+		}
 	});
 };
 
@@ -2480,34 +2670,74 @@ ImprovedTube.refreshAutoDubbedMenuLayout = function (panel) {
 		return setTimeout(callback, 0);
 	};
 	const recalculate = function () {
-		// Remove the previous fit-content workaround before measuring.  It made
-		// the long "preferred languages" footer define the menu width.
-		ImprovedTube.restoreAutoDubbedMenuLayout(panel);
+		if (ImprovedTube.storage.hide_auto_dubbed_options !== true || panel.isConnected === false ||
+			!panel.querySelector?.('[data-it-auto-dubbed-hidden="true"]')) return;
 
-		// YouTube measured this panel while the auto-dub section was still present.
-		// Measure a filtered copy and set that exact native width on the live panel.
-		// This does not depend on YouTube noticing a synthetic resize event.
-		ImprovedTube.applyFilteredAudioMenuWidth(panel);
+		// YouTube measures the first audio panel before our filter runs and can
+		// rewrite its inline dimensions during the opening transition. Re-measure
+		// a filtered clone and keep both live containers at that native size.
+		ImprovedTube.resetFilteredAudioMenuScroll(panel);
+		ImprovedTube.applyFilteredAudioMenuLayout(panel);
 		void panel.offsetWidth;
 	};
 
-	if (this.autoDubbedMenuLayoutFrame) {
-		const cancelFrame = window.cancelAnimationFrame?.bind(window) || clearTimeout;
-		cancelFrame(this.autoDubbedMenuLayoutFrame);
-	}
-
-	this.autoDubbedMenuLayoutFrame = scheduleFrame(function () {
-		recalculate();
-		ImprovedTube.autoDubbedMenuLayoutFrame = scheduleFrame(function () {
-			ImprovedTube.autoDubbedMenuLayoutFrame = null;
-			recalculate();
-		});
+	this.cancelAutoDubbedMenuLayoutRefresh();
+	const job = {frame: null, timers: []};
+	this.autoDubbedMenuLayoutJob = job;
+	job.frame = scheduleFrame(recalculate);
+	job.timers = [0, 50, 150, 350, 750].map(function (delay) {
+		return setTimeout(recalculate, delay);
 	});
 };
 
+ImprovedTube.getAutoDubbedAudioMenuPanel = function () {
+	const panels = document.querySelectorAll?.('.ytp-settings-menu .ytp-panel-menu') || [];
+	let activePanel = null;
+	let activeIntersection = 0;
+	let activeIntersectionRatio = 0;
+
+	for (const panel of panels) {
+		const items = panel.querySelectorAll('.ytp-menuitem');
+		const containsAutoDubbedSection = Array.from(items).some(function (item) {
+			return item.classList.contains('ytp-menuitem-section-header') && ImprovedTube.isAutoDubbedMenuHeader(item);
+		});
+		if (!containsAutoDubbedSection) continue;
+
+		const layoutPanel = panel.closest?.('.ytp-panel') || panel;
+		const settingsMenu = layoutPanel.closest?.('.ytp-settings-menu') || panel.closest?.('.ytp-settings-menu');
+		const rect = layoutPanel.getBoundingClientRect?.();
+		const menuRect = settingsMenu?.getBoundingClientRect?.();
+		if (!rect || !menuRect || rect.width <= 0 || rect.height <= 0 || menuRect.width <= 0 || menuRect.height <= 0) continue;
+
+		// YouTube keeps both submenu panels rendered during and after its slide
+		// transition. offsetParent therefore also matches the old, translated panel.
+		// Only the panel occupying the visible settings popup may own its layout.
+		const intersectionWidth = Math.max(0, Math.min(rect.right, menuRect.right) - Math.max(rect.left, menuRect.left));
+		const intersectionHeight = Math.max(0, Math.min(rect.bottom, menuRect.bottom) - Math.max(rect.top, menuRect.top));
+		const intersection = intersectionWidth * intersectionHeight;
+		const intersectionRatio = intersection / (rect.width * rect.height);
+		if (intersectionRatio > activeIntersectionRatio ||
+			(intersectionRatio === activeIntersectionRatio && intersection > activeIntersection)) {
+			activeIntersection = intersection;
+			activeIntersectionRatio = intersectionRatio;
+			activePanel = panel;
+		}
+	}
+
+	return activePanel;
+};
+
 ImprovedTube.hideAutoDubbedMenuItems = function () {
-	const panel = document.querySelector('.ytp-panel .ytp-panel-menu');
-	if (!panel) return;
+	const previousPanel = ImprovedTube.autoDubbedMenuPanel;
+	const panel = ImprovedTube.getAutoDubbedAudioMenuPanel();
+	if (!panel) {
+		ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
+		ImprovedTube.restoreAutoDubbedMenuLayout(previousPanel);
+		ImprovedTube.autoDubbedMenuPanel = null;
+		return;
+	}
+	if (previousPanel && previousPanel !== panel) ImprovedTube.restoreAutoDubbedMenuLayout(previousPanel);
+	ImprovedTube.autoDubbedMenuPanel = panel;
 
 	const shouldHide = ImprovedTube.storage.hide_auto_dubbed_options === true;
 	const items = panel.querySelectorAll('.ytp-menuitem');
@@ -2522,7 +2752,9 @@ ImprovedTube.hideAutoDubbedMenuItems = function () {
 
 		if (shouldHide && inAutoDubbedSection) {
 			item.dataset.itAutoDubbedHidden = 'true';
-			item.style.display = 'none';
+			if (item.style.getPropertyValue('display') !== 'none' || item.style.getPropertyPriority('display') !== 'important') {
+				item.style.setProperty('display', 'none', 'important');
+			}
 			hiddenItemCount++;
 		} else if (item.dataset.itAutoDubbedHidden === 'true') {
 			delete item.dataset.itAutoDubbedHidden;
@@ -2531,9 +2763,16 @@ ImprovedTube.hideAutoDubbedMenuItems = function () {
 	});
 
 	if (shouldHide && hiddenItemCount > 0) {
+		// Do the complete filtered layout synchronously. MutationObserver callbacks
+		// run before paint, so the oversized/scrolled intermediate state is never
+		// presented to the user.
+		ImprovedTube.resetFilteredAudioMenuScroll(panel);
+		ImprovedTube.applyFilteredAudioMenuLayout(panel);
 		ImprovedTube.refreshAutoDubbedMenuLayout(panel);
 	} else {
+		ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
 		ImprovedTube.restoreAutoDubbedMenuLayout(panel);
+		ImprovedTube.autoDubbedMenuPanel = null;
 	}
 };
 
