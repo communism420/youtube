@@ -8,7 +8,7 @@ function loadDubbingPolicy(context) {
 		'utf8'
 	);
 	const start = source.indexOf('ImprovedTube.getAudioTrackInfo = function (track) {');
-	const end = source.indexOf('/*------------------------------------------------------------------------------\n# JUMP TO THE NEXT KEY SCENE', start);
+	const end = source.indexOf('ImprovedTube.jumpToKeyScene = function () {', start);
 
 	if (start < 0 || end < 0) {
 		throw new Error('Dubbing policy source was not found');
