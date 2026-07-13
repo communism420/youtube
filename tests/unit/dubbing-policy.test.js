@@ -116,12 +116,65 @@ describe('dubbing policy', () => {
 		const {context, player, setAudioTrackCalls} = createContext([original, autoRussian]);
 
 		delete player.getAudioTrack;
+		expect(context.ImprovedTube.stopAutoDubbingGuard).toBeUndefined();
+		expect(context.ImprovedTube.enforceAutoDubbingPolicy).toBeUndefined();
 		context.ImprovedTube.disableAutoDubbing();
+		expect(typeof context.ImprovedTube.stopAutoDubbingGuard).toBe('function');
+		expect(typeof context.ImprovedTube.enforceAutoDubbingPolicy).toBe('function');
 		context.ImprovedTube.autoDubbingGuard.enforce();
 		context.ImprovedTube.autoDubbingGuard.enforce();
 
 		expect(setAudioTrackCalls()).toBe(1);
 		expect(context.ImprovedTube.autoDubbingGuard.interval).toBeNull();
+	});
+
+	test('stops the lazily defined guard when auto dubbing protection is disabled', () => {
+		const original = audioTrack({id: 'en', languageCode: 'en', name: 'English', isDefault: true});
+		const autoRussian = audioTrack({id: 'ru.2', languageCode: 'ru', name: 'Russian', isAutoDubbed: true});
+		const {context, player} = createContext([autoRussian, original]);
+		const listeners = {};
+		const removedListeners = [];
+		const video = {
+			addEventListener: (type, listener) => {
+				listeners[type] = listener;
+			},
+			removeEventListener: (type, listener) => {
+				removedListeners.push([type, listener]);
+			}
+		};
+		let clearedInterval;
+		player.querySelector = () => video;
+		context.clearInterval = interval => {
+			clearedInterval = interval;
+		};
+
+		context.ImprovedTube.disableAutoDubbing();
+		const guard = context.ImprovedTube.autoDubbingGuard;
+		expect(listeners.loadedmetadata).toBe(guard.forceSelection);
+		expect(listeners.playing).toBe(guard.enforce);
+		context.ImprovedTube.storage.disable_auto_dubbing = false;
+		context.ImprovedTube.stopAutoDubbingGuard();
+
+		expect(clearedInterval).toBe(1);
+		expect(removedListeners).toEqual([
+			['loadedmetadata', guard.forceSelection],
+			['playing', guard.enforce]
+		]);
+		expect(context.ImprovedTube.autoDubbingGuard).toBeNull();
+	});
+
+	test('keeps shared preferred-language selection available while the feature is disabled', () => {
+		const original = audioTrack({id: 'en', languageCode: 'en', name: 'English', isDefault: true});
+		const humanRussian = audioTrack({id: 'ru.1', languageCode: 'ru', name: 'Russian'});
+		const {context, selectedTrack} = createContext([original, humanRussian]);
+		context.ImprovedTube.storage.disable_auto_dubbing = false;
+		context.ImprovedTube.storage.preferred_dubbing_language = 'ru';
+
+		context.ImprovedTube.preferredDubbingLanguage();
+
+		expect(selectedTrack()).toBe(humanRussian);
+		expect(context.ImprovedTube.stopAutoDubbingGuard).toBeUndefined();
+		expect(context.ImprovedTube.enforceAutoDubbingPolicy).toBeUndefined();
 	});
 
 	test('falls back to the original track when the preferred language exists only as auto-dub', () => {

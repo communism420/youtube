@@ -2245,66 +2245,58 @@ ImprovedTube.selectPermittedAudioTrack = function (player, preferredLanguage) {
 	return targetTrack || null;
 };
 
-ImprovedTube.stopAutoDubbingGuard = function () {
-	const guard = this.autoDubbingGuard;
-	if (!guard) return;
+ImprovedTube.disableAutoDubbing = function () {
+	// These lifecycle helpers belong only to this feature. Define them lazily so
+	// they do not exist when auto-dubbing protection has never been enabled.
+	ImprovedTube.stopAutoDubbingGuard = function () {
+		const guard = this.autoDubbingGuard;
+		if (!guard) return;
 
-	clearInterval(guard.interval);
-	guard.video?.removeEventListener('loadedmetadata', guard.forceSelection);
-	guard.video?.removeEventListener('playing', guard.enforce);
-	this.autoDubbingGuard = null;
-};
+		clearInterval(guard.interval);
+		guard.video?.removeEventListener('loadedmetadata', guard.forceSelection);
+		guard.video?.removeEventListener('playing', guard.enforce);
+		this.autoDubbingGuard = null;
+	};
 
-ImprovedTube.enforceAutoDubbingPolicy = function () {
-	if (this.storage.disable_auto_dubbing !== true) {
-		this.stopAutoDubbingGuard();
-		return;
-	}
+	ImprovedTube.enforceAutoDubbingPolicy = function () {
+		const player = this.elements.player;
+		if (!player?.getAvailableAudioTracks) return;
 
-	const player = this.elements.player;
-	if (!player?.getAvailableAudioTracks) return;
+		if (this.autoDubbingGuard?.player !== player) this.stopAutoDubbingGuard();
 
-	if (this.autoDubbingGuard?.player !== player) this.stopAutoDubbingGuard();
+		if (!this.autoDubbingGuard) {
+			const video = player.querySelector?.('video');
+			const canReadCurrentTrack = typeof player.getAudioTrack === 'function';
+			const guard = {
+				player,
+				video,
+				enforce: function () {
+					// The storage listener normally stops the guard synchronously. Keep
+					// this check for a callback that was already queued before disabling.
+					if (ImprovedTube.storage.disable_auto_dubbing !== true || !canReadCurrentTrack) return;
 
-	if (!this.autoDubbingGuard) {
-		const video = player.querySelector?.('video');
-		const canReadCurrentTrack = typeof player.getAudioTrack === 'function';
-		const guard = {
-			player,
-			video,
-			enforce: function () {
-				// Some YouTube player builds expose setAudioTrack() but not a
-				// reliable getter. Never keep switching tracks blindly in that case.
-				if (!canReadCurrentTrack) return;
-
-				const currentTrack = player.getAudioTrack();
-				if (currentTrack && ImprovedTube.audioTrackIsAutoDubbed(currentTrack)) {
-					ImprovedTube.selectPermittedAudioTrack(player);
-				}
-			},
-			forceSelection: function () {
-				setTimeout(function () {
-					if (ImprovedTube.storage.disable_auto_dubbing === true) {
+					const currentTrack = player.getAudioTrack();
+					if (currentTrack && ImprovedTube.audioTrackIsAutoDubbed(currentTrack)) {
 						ImprovedTube.selectPermittedAudioTrack(player);
 					}
-				}, 0);
-			}
-		};
+				},
+				forceSelection: function () {
+					setTimeout(function () {
+						if (ImprovedTube.storage.disable_auto_dubbing === true) {
+							ImprovedTube.selectPermittedAudioTrack(player);
+						}
+					}, 0);
+				}
+			};
 
-		guard.interval = canReadCurrentTrack ? setInterval(guard.enforce, 1000) : null;
-		video?.addEventListener('loadedmetadata', guard.forceSelection);
-		video?.addEventListener('playing', guard.enforce);
-		this.autoDubbingGuard = guard;
-	}
+			guard.interval = canReadCurrentTrack ? setInterval(guard.enforce, 1000) : null;
+			video?.addEventListener('loadedmetadata', guard.forceSelection);
+			video?.addEventListener('playing', guard.enforce);
+			this.autoDubbingGuard = guard;
+		}
 
-	this.autoDubbingGuard.enforce();
-};
-
-ImprovedTube.disableAutoDubbing = function () {
-	if (this.storage.disable_auto_dubbing !== true) {
-		this.stopAutoDubbingGuard();
-		return;
-	}
+		this.autoDubbingGuard.enforce();
+	};
 
 	this.selectPermittedAudioTrack(this.elements.player);
 	this.enforceAutoDubbingPolicy();
@@ -2789,7 +2781,7 @@ ImprovedTube.preferredDubbingLanguage = function () {
 	if (!preferred) return;
 
 	this.selectPermittedAudioTrack(this.elements.player, preferred);
-	this.enforceAutoDubbingPolicy();
+	if (this.storage.disable_auto_dubbing === true) this.enforceAutoDubbingPolicy?.();
 };
 /*------------------------------------------------------------------------------
 # SELECT DEFAULT DUBBED LANGUAGE

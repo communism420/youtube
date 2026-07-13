@@ -516,7 +516,11 @@ document.addEventListener('it-message-from-extension', function () {
 					}
 					break
 				case 'disableAutoDubbing':
-					ImprovedTube.disableAutoDubbing();
+					if (ImprovedTube.storage.disable_auto_dubbing === true) {
+						ImprovedTube.disableAutoDubbing();
+					} else {
+						ImprovedTube.stopAutoDubbingGuard?.();
+					}
 					break
 				case 'hideAutoDubbedOptions':
 					ImprovedTube.observeAutoDubbedMenu();
