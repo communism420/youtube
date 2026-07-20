@@ -752,27 +752,42 @@ ImprovedTube.createIconButton = function (options) {
 };
 
 ImprovedTube.createPlayerButton = function (options) {
-	var controls = options.position == "right" ? this.elements.player_right_controls : this.elements.player_left_controls;
+	const controls = options.position == "right" ? this.elements.player_right_controls : this.elements.player_left_controls;
 	if (controls) {
-		var button = document.createElement('button');
+		const button = document.createElement('button');
 
 		button.className = 'ytp-button it-player-button';
 
 		button.dataset.title = options.title;
 
 		button.addEventListener('mouseover', function () {
-			var tooltip = document.createElement('div'),
+			const tooltip = document.createElement('div'),
 				rect = this.getBoundingClientRect();
 
 			tooltip.className = 'it-player-button--tooltip';
+			tooltip.textContent = this.dataset.title;
 
-			tooltip.style.left = rect.left + rect.width / 2 + 'px';
+			document.body.appendChild(tooltip);
+
+			const tooltipWidth = tooltip.offsetWidth || tooltip.getBoundingClientRect().width;
+			const centerX = rect.left + (rect.width / 2);
+			let leftPos = centerX - (tooltipWidth / 2);
+			const margin = 10;
+			const viewportWidth = window.innerWidth;
+
+			if (leftPos < margin) {
+				leftPos = margin;
+			} else if (leftPos + tooltipWidth > viewportWidth - margin) {
+				leftPos = viewportWidth - tooltipWidth - margin;
+			}
+
+			tooltip.style.left = leftPos + 'px';
 			tooltip.style.top = rect.top - 8 + 'px';
 
-			tooltip.textContent = this.dataset.title;
 			if (this.storage && (this.storage.player_cinema_mode_button || this.storage.player_auto_hide_cinema_mode_when_paused || this.storage.player_auto_cinema_mode)) {
 				tooltip.style.zIndex = 10001;
 			} // needed for cinema mode
+
 			function mouseleave() {
 				tooltip.remove();
 
@@ -780,8 +795,6 @@ ImprovedTube.createPlayerButton = function (options) {
 			}
 
 			this.addEventListener('mouseleave', mouseleave);
-
-			document.body.appendChild(tooltip);
 		});
 
 		if (options.id) {
