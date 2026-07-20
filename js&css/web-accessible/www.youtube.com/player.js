@@ -2385,12 +2385,30 @@ ImprovedTube.isAutoDubbedMenuLayoutProbe = function (node) {
 	);
 };
 
+ImprovedTube.restoreAutoDubbedMenuBeforeBack = function (event) {
+	const backControl = event.target?.closest?.('.ytp-panel-back-button, .ytp-panel-title');
+	const panel = ImprovedTube.autoDubbedMenuPanel;
+	const menuPanel = panel?.closest?.('.ytp-panel');
+	if (!backControl || !menuPanel || backControl.closest?.('.ytp-panel') !== menuPanel) return;
+
+	// Run in the capture phase so YouTube measures the root menu only after the
+	// compact audio-menu constraints have been removed.
+	ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
+	ImprovedTube.restoreAutoDubbedMenuLayout(panel);
+	ImprovedTube.autoDubbedMenuPanel = null;
+};
+
 ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
 	if (!panel) return;
 
 	const menuPanel = panel.closest?.('.ytp-panel');
 	const settingsMenu = menuPanel?.closest?.('.ytp-settings-menu');
-	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(function (element) {
+	// YouTube detaches the old submenu at the end of its slide transition. Keep
+	// the elements captured while it was connected, because closest() can no
+	// longer reach the shared settings popup by the time the observer restores it.
+	const elements = new Set(panel.itAutoDubbedMenuLayoutElements || []);
+	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(element => elements.add(element));
+	elements.forEach(function (element) {
 		const saved = element.dataset.itAutoDubbedMenuLayout;
 		if (!saved) return;
 
@@ -2424,6 +2442,8 @@ ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
 		delete element.dataset.itAutoDubbedMenuLayout;
 		delete element.dataset.itAutoDubbedMenuAppliedLayout;
 	});
+
+	delete panel.itAutoDubbedMenuLayoutElements;
 };
 
 ImprovedTube.restoreAutoDubbedMenuLayoutProperties = function (element, properties) {
@@ -2579,6 +2599,11 @@ ImprovedTube.applyFilteredAudioMenuLayout = function (panel) {
 	const layout = this.measureFilteredAudioMenuLayout(panel);
 	if (!menuPanel || !layout || (!layout.width && !layout.height)) return;
 
+	const layoutElements = new Set(panel.itAutoDubbedMenuLayoutElements || []);
+	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(element => layoutElements.add(element));
+	panel.itAutoDubbedMenuLayoutElements = Array.from(layoutElements);
+	menuPanel.addEventListener?.('click', ImprovedTube.restoreAutoDubbedMenuBeforeBack, true);
+
 	// The inner table can retain the height and overflow of the unfiltered audio
 	// list even after its rows are hidden. That stale box is what leaves the
 	// first opening blank/scrolled; let the filtered rows define it naturally.
@@ -2662,8 +2687,15 @@ ImprovedTube.refreshAutoDubbedMenuLayout = function (panel) {
 		return setTimeout(callback, 0);
 	};
 	const recalculate = function () {
-		if (ImprovedTube.storage.hide_auto_dubbed_options !== true || panel.isConnected === false ||
-			!panel.querySelector?.('[data-it-auto-dubbed-hidden="true"]')) return;
+		if (ImprovedTube.autoDubbedMenuPanel !== panel ||
+			ImprovedTube.storage.hide_auto_dubbed_options !== true || panel.isConnected === false ||
+			!panel.querySelector?.('[data-it-auto-dubbed-hidden="true"]') ||
+			ImprovedTube.getAutoDubbedAudioMenuPanel() !== panel) {
+			ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
+			ImprovedTube.restoreAutoDubbedMenuLayout(panel);
+			if (ImprovedTube.autoDubbedMenuPanel === panel) ImprovedTube.autoDubbedMenuPanel = null;
+			return;
+		}
 
 		// YouTube measures the first audio panel before our filter runs and can
 		// rewrite its inline dimensions during the opening transition. Re-measure
@@ -2696,6 +2728,11 @@ ImprovedTube.getAutoDubbedAudioMenuPanel = function () {
 		if (!containsAutoDubbedSection) continue;
 
 		const layoutPanel = panel.closest?.('.ytp-panel') || panel;
+		// These classes make an outgoing panel transparent and translate it away.
+		// It must release the shared popup immediately, before YouTube detaches it.
+		if (layoutPanel.classList?.contains('ytp-panel-animate-back') ||
+			layoutPanel.classList?.contains('ytp-panel-animate-forward')) continue;
+
 		const settingsMenu = layoutPanel.closest?.('.ytp-settings-menu') || panel.closest?.('.ytp-settings-menu');
 		const rect = layoutPanel.getBoundingClientRect?.();
 		const menuRect = settingsMenu?.getBoundingClientRect?.();

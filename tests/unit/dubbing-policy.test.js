@@ -304,7 +304,9 @@ describe('dubbing policy', () => {
 			getBoundingClientRect: () => ({bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300})
 		};
 		let audioRect = {bottom: 200, height: 200, left: 300, right: 600, top: 0, width: 300};
+		let audioPanelIsOutgoing = false;
 		const audioLayoutPanel = {
+			classList: {contains: value => audioPanelIsOutgoing && value === 'ytp-panel-animate-back'},
 			closest: selector => selector === '.ytp-settings-menu' ? popup : null,
 			getBoundingClientRect: () => audioRect
 		};
@@ -324,6 +326,26 @@ describe('dubbing policy', () => {
 		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
 		audioRect = {bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300};
 		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBe(audioPanel);
+		audioPanelIsOutgoing = true;
+		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
+	});
+
+	test('releases the shared popup before YouTube handles audio-menu back navigation', () => {
+		const {context} = createContext([]);
+		const calls = [];
+		const menuPanel = {};
+		const panel = {closest: selector => selector === '.ytp-panel' ? menuPanel : null};
+		const backControl = {closest: selector => selector === '.ytp-panel' ? menuPanel : null};
+		context.ImprovedTube.autoDubbedMenuPanel = panel;
+		context.ImprovedTube.cancelAutoDubbedMenuLayoutRefresh = () => calls.push('cancel');
+		context.ImprovedTube.restoreAutoDubbedMenuLayout = restoredPanel => calls.push(restoredPanel);
+
+		context.ImprovedTube.restoreAutoDubbedMenuBeforeBack({
+			target: {closest: () => backControl}
+		});
+
+		expect(calls).toEqual(['cancel', panel]);
+		expect(context.ImprovedTube.autoDubbedMenuPanel).toBeNull();
 	});
 
 	test('uses the native size of a filtered panel copy instead of the first-open size', () => {
@@ -347,7 +369,16 @@ describe('dubbing policy', () => {
 
 		const menuPanelStyle = createStyle();
 		let menuPanelScrollTop = 120;
-		const menuPanel = {dataset: {}, style: menuPanelStyle};
+		let menuPanelIsOutgoing = false;
+		const menuPanel = {
+			addEventListener(type, listener, capture) {
+				this.backListener = {capture, listener, type};
+			},
+			classList: {contains: value => menuPanelIsOutgoing && value === 'ytp-panel-animate-back'},
+			dataset: {},
+			getBoundingClientRect: () => ({bottom: 176, height: 176, left: 0, right: 228, top: 0, width: 228}),
+			style: menuPanelStyle
+		};
 		Object.defineProperty(menuPanel, 'scrollTop', {
 			get() {
 				return menuPanelScrollTop;
@@ -376,7 +407,13 @@ describe('dubbing policy', () => {
 				this.removed = true;
 			}
 		};
-		const popup = {dataset: {}, scrollTop: 60, style: createStyle(), cloneNode: () => probe};
+		const popup = {
+			dataset: {},
+			getBoundingClientRect: () => ({bottom: 176, height: 176, left: 0, right: 228, top: 0, width: 228}),
+			scrollTop: 60,
+			style: createStyle(),
+			cloneNode: () => probe
+		};
 		const player = {
 			appendChild: node => {
 				player.appended = node;
@@ -387,6 +424,10 @@ describe('dubbing policy', () => {
 			scrollTop: 240,
 			style: createStyle(),
 			querySelector: selector => selector === '[data-it-auto-dubbed-hidden="true"]' ? {} : null,
+			querySelectorAll: selector => selector === '.ytp-menuitem' ? [{
+				classList: {contains: value => value === 'ytp-menuitem-section-header'},
+				textContent: 'Automatic dubbing'
+			}] : [],
 			closest: selector => {
 				if (selector === '.ytp-panel') return menuPanel;
 				if (selector === '.html5-video-player, #movie_player') return player;
@@ -394,6 +435,7 @@ describe('dubbing policy', () => {
 			}
 		};
 		menuPanel.closest = selector => ['.ytp-popup', '.ytp-settings-menu'].includes(selector) ? popup : null;
+		context.document.querySelectorAll = () => [panel];
 		panel.style.setProperty('height', '352px');
 		panel.style.setProperty('min-height', '352px');
 		panel.style.setProperty('max-height', '352px');
@@ -404,6 +446,11 @@ describe('dubbing policy', () => {
 		context.ImprovedTube.applyFilteredAudioMenuLayout(panel);
 
 		expect(player.appended).toBe(probe);
+		expect(menuPanel.backListener).toEqual({
+			capture: true,
+			listener: context.ImprovedTube.restoreAutoDubbedMenuBeforeBack,
+			type: 'click'
+		});
 		expect(probe.removed).toBe(true);
 		expect(probe.style.getPropertyValue('right')).toBe('auto');
 		expect(menuPanel.style.getPropertyValue('width')).toBe('228px');
@@ -438,6 +485,7 @@ describe('dubbing policy', () => {
 		};
 		context.clearTimeout = () => {};
 		context.ImprovedTube.storage.hide_auto_dubbed_options = true;
+		context.ImprovedTube.autoDubbedMenuPanel = panel;
 		context.ImprovedTube.refreshAutoDubbedMenuLayout(panel);
 		expect(panel.scrollTop).toBe(0);
 		expect(menuPanel.scrollTop).toBe(0);
@@ -461,6 +509,10 @@ describe('dubbing policy', () => {
 		// for the root settings menu while removing our remaining constraints.
 		menuPanel.style.setProperty('width', '340px');
 		popup.style.setProperty('width', '340px');
+		const connectedPanelClosest = panel.closest;
+		const connectedMenuPanelClosest = menuPanel.closest;
+		panel.closest = () => null;
+		menuPanel.closest = () => null;
 		context.ImprovedTube.restoreAutoDubbedMenuLayout(panel);
 		expect(menuPanel.style.getPropertyValue('width')).toBe('340px');
 		expect(menuPanel.style.getPropertyValue('min-width')).toBe('');
@@ -479,12 +531,24 @@ describe('dubbing policy', () => {
 		expect(panel.style.getPropertyValue('overflow')).toBe('auto');
 		expect(panel.style.getPropertyValue('overflow-x')).toBe('auto');
 		expect(panel.style.getPropertyValue('overflow-y')).toBe('auto');
+		expect(panel.itAutoDubbedMenuLayoutElements).toBeUndefined();
 
 		// Keep native scrolling when the remaining human-made track list is
 		// genuinely taller than the available panel viewport.
+		panel.closest = connectedPanelClosest;
+		menuPanel.closest = connectedMenuPanelClosest;
 		probePanel.scrollHeight = 320;
 		context.ImprovedTube.applyFilteredAudioMenuLayout(panel);
 		expect(menuPanel.style.getPropertyValue('overflow')).toBe('');
 		expect(menuPanel.style.getPropertyValue('overflow-y')).toBe('');
+
+		// A queued correction must not reclaim the shared popup once YouTube has
+		// started animating the audio submenu out.
+		menuPanelIsOutgoing = true;
+		delayedCallbacks[0]();
+		expect(menuPanel.style.getPropertyValue('width')).toBe('340px');
+		expect(menuPanel.style.getPropertyValue('min-width')).toBe('');
+		expect(popup.style.getPropertyValue('width')).toBe('340px');
+		expect(popup.style.getPropertyValue('min-width')).toBe('');
 	});
 });
