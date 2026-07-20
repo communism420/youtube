@@ -289,6 +289,34 @@ describe('dubbing policy', () => {
 			target: {classList: {contains: value => value === 'ytp-progress-bar'}}
 		}]);
 		expect(hideCalls).toBe(2);
+
+		const reattachedPanel = {
+			itAutoDubbedMenuLeaving: true,
+			matches: selector => selector === '.ytp-panel-menu',
+			nodeType: 1,
+			querySelectorAll: () => []
+		};
+		observer.callback([{
+			addedNodes: [reattachedPanel],
+			removedNodes: [],
+			type: 'childList'
+		}]);
+		expect(reattachedPanel.itAutoDubbedMenuLeaving).toBeUndefined();
+		expect(hideCalls).toBe(3);
+
+		const reparentedPanel = {
+			itAutoDubbedMenuLeaving: true,
+			matches: selector => selector === '.ytp-panel-menu',
+			nodeType: 1,
+			querySelectorAll: () => []
+		};
+		observer.callback([{
+			addedNodes: [reparentedPanel],
+			removedNodes: [reparentedPanel],
+			type: 'childList'
+		}]);
+		expect(reparentedPanel.itAutoDubbedMenuLeaving).toBe(true);
+		expect(hideCalls).toBe(4);
 	});
 
 	test('selects the active audio panel instead of the first settings panel', () => {
@@ -303,7 +331,17 @@ describe('dubbing policy', () => {
 		const popup = {
 			getBoundingClientRect: () => ({bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300})
 		};
-		let audioRect = {bottom: 200, height: 200, left: 300, right: 600, top: 0, width: 300};
+		let rootRect = {bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300};
+		const rootLayoutPanel = {
+			closest: selector => selector === '.ytp-settings-menu' ? popup : null,
+			getBoundingClientRect: () => rootRect
+		};
+		rootPanel.closest = selector => {
+			if (selector === '.ytp-panel') return rootLayoutPanel;
+			if (selector === '.ytp-settings-menu') return popup;
+			return null;
+		};
+		let audioRect = {bottom: 200, height: 200, left: 260, right: 560, top: 0, width: 300};
 		let audioPanelIsOutgoing = false;
 		const audioLayoutPanel = {
 			classList: {contains: value => audioPanelIsOutgoing && value === 'ytp-panel-animate-back'},
@@ -321,31 +359,104 @@ describe('dubbing policy', () => {
 			getBoundingClientRect: () => ({bottom: 400, height: 400, left: 0, right: 300, top: 0, width: 300}),
 			querySelectorAll: () => [menuItem('Автоматическое дублирование', true), menuItem('Russian')]
 		};
-		context.document.querySelectorAll = () => [rootPanel, audioPanel];
+		context.document.querySelectorAll = () => [audioPanel, rootPanel];
 
+		// The stale audio panel can still intersect the popup while the root panel
+		// is already fully visible. Only the most visible panel may own the layout.
 		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
+		rootRect = {bottom: 200, height: 200, left: -300, right: 0, top: 0, width: 300};
 		audioRect = {bottom: 200, height: 200, left: 0, right: 300, top: 0, width: 300};
 		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBe(audioPanel);
+		audioPanel.itAutoDubbedMenuLeaving = true;
+		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
+		delete audioPanel.itAutoDubbedMenuLeaving;
 		audioPanelIsOutgoing = true;
 		expect(context.ImprovedTube.getAutoDubbedAudioMenuPanel()).toBeNull();
 	});
 
 	test('releases the shared popup before YouTube handles audio-menu back navigation', () => {
 		const {context} = createContext([]);
-		const calls = [];
-		const menuPanel = {};
-		const panel = {closest: selector => selector === '.ytp-panel' ? menuPanel : null};
+		const createStyle = () => {
+			const values = {height: '190px'};
+			const priorities = {height: 'important'};
+			return {
+				getPropertyPriority: property => priorities[property] || '',
+				getPropertyValue: property => values[property] || '',
+				removeProperty(property) {
+					delete values[property];
+					delete priorities[property];
+				},
+				setProperty(property, value, priority = '') {
+					values[property] = value;
+					priorities[property] = priority;
+				}
+			};
+		};
+		const savedLayout = JSON.stringify({height: {priority: '', value: '352px'}});
+		const appliedLayout = JSON.stringify({height: {priority: 'important', value: '176px'}});
+		const popup = {
+			dataset: {
+				itAutoDubbedMenuAppliedLayout: appliedLayout,
+				itAutoDubbedMenuLayout: savedLayout
+			},
+			style: createStyle()
+		};
+		const menuPanel = {
+			closest: selector => selector === '.ytp-settings-menu' ? popup : null,
+			dataset: {
+				itAutoDubbedMenuAppliedLayout: appliedLayout,
+				itAutoDubbedMenuLayout: savedLayout
+			},
+			style: createStyle()
+		};
+		const panel = {
+			closest: selector => selector === '.ytp-panel' ? menuPanel : null,
+			dataset: {},
+			itAutoDubbedMenuLayoutElements: [menuPanel, popup],
+			style: createStyle()
+		};
 		const backControl = {closest: selector => selector === '.ytp-panel' ? menuPanel : null};
 		context.ImprovedTube.autoDubbedMenuPanel = panel;
-		context.ImprovedTube.cancelAutoDubbedMenuLayoutRefresh = () => calls.push('cancel');
-		context.ImprovedTube.restoreAutoDubbedMenuLayout = restoredPanel => calls.push(restoredPanel);
+		context.ImprovedTube.cancelAutoDubbedMenuLayoutRefresh = () => {};
 
 		context.ImprovedTube.restoreAutoDubbedMenuBeforeBack({
 			target: {closest: () => backControl}
 		});
 
-		expect(calls).toEqual(['cancel', panel]);
+		expect(menuPanel.style.getPropertyValue('height')).toBe('352px');
+		expect(menuPanel.style.getPropertyPriority('height')).toBe('');
+		expect(popup.style.getPropertyValue('height')).toBe('352px');
+		expect(popup.style.getPropertyPriority('height')).toBe('');
+		expect(panel.itAutoDubbedMenuLayoutElements).toBeUndefined();
+		expect(panel.itAutoDubbedMenuLeaving).toBe(true);
 		expect(context.ImprovedTube.autoDubbedMenuPanel).toBeNull();
+	});
+
+	test('releases the audio layout when focus moves to another settings panel', () => {
+		const {context} = createContext([]);
+		const audioLayoutPanel = {querySelector: () => null};
+		const rootLayoutPanel = {querySelector: () => null};
+		const panel = {closest: selector => selector === '.ytp-panel' ? audioLayoutPanel : null};
+		let releasedPanel;
+		context.ImprovedTube.autoDubbedMenuPanel = panel;
+		context.ImprovedTube.releaseAutoDubbedMenuLayout = released => {
+			releasedPanel = released;
+		};
+
+		context.ImprovedTube.restoreAutoDubbedMenuBeforePanelFocus({
+			target: {closest: selector => selector === '.ytp-panel' ? rootLayoutPanel : null}
+		});
+		expect(releasedPanel).toBe(panel);
+
+		const reusedMenu = {itAutoDubbedMenuLeaving: true};
+		const reusedAudioLayoutPanel = {
+			querySelector: selector => selector === '.ytp-panel-menu' ? reusedMenu : null
+		};
+		context.ImprovedTube.autoDubbedMenuPanel = null;
+		context.ImprovedTube.restoreAutoDubbedMenuBeforePanelFocus({
+			target: {closest: selector => selector === '.ytp-panel' ? reusedAudioLayoutPanel : null}
+		});
+		expect(reusedMenu.itAutoDubbedMenuLeaving).toBeUndefined();
 	});
 
 	test('uses the native size of a filtered panel copy instead of the first-open size', () => {
@@ -408,6 +519,9 @@ describe('dubbing policy', () => {
 			}
 		};
 		const popup = {
+			addEventListener(type, listener, capture) {
+				this.focusListener = {capture, listener, type};
+			},
 			dataset: {},
 			getBoundingClientRect: () => ({bottom: 176, height: 176, left: 0, right: 228, top: 0, width: 228}),
 			scrollTop: 60,
@@ -450,6 +564,11 @@ describe('dubbing policy', () => {
 			capture: true,
 			listener: context.ImprovedTube.restoreAutoDubbedMenuBeforeBack,
 			type: 'click'
+		});
+		expect(popup.focusListener).toEqual({
+			capture: true,
+			listener: context.ImprovedTube.restoreAutoDubbedMenuBeforePanelFocus,
+			type: 'focusin'
 		});
 		expect(probe.removed).toBe(true);
 		expect(probe.style.getPropertyValue('right')).toBe('auto');
@@ -508,7 +627,9 @@ describe('dubbing policy', () => {
 		// When navigating back, keep dimensions that YouTube has already replaced
 		// for the root settings menu while removing our remaining constraints.
 		menuPanel.style.setProperty('width', '340px');
+		menuPanel.style.setProperty('height', '244px');
 		popup.style.setProperty('width', '340px');
+		popup.style.setProperty('height', '244px');
 		const connectedPanelClosest = panel.closest;
 		const connectedMenuPanelClosest = menuPanel.closest;
 		panel.closest = () => null;
@@ -517,11 +638,11 @@ describe('dubbing policy', () => {
 		expect(menuPanel.style.getPropertyValue('width')).toBe('340px');
 		expect(menuPanel.style.getPropertyValue('min-width')).toBe('');
 		expect(menuPanel.style.getPropertyValue('max-width')).toBe('');
-		expect(menuPanel.style.getPropertyValue('height')).toBe('');
+		expect(menuPanel.style.getPropertyValue('height')).toBe('244px');
 		expect(popup.style.getPropertyValue('width')).toBe('340px');
 		expect(popup.style.getPropertyValue('min-width')).toBe('');
 		expect(popup.style.getPropertyValue('max-width')).toBe('');
-		expect(popup.style.getPropertyValue('height')).toBe('');
+		expect(popup.style.getPropertyValue('height')).toBe('244px');
 		expect(menuPanel.style.getPropertyValue('overflow')).toBe('');
 		expect(menuPanel.style.getPropertyValue('overflow-x')).toBe('');
 		expect(menuPanel.style.getPropertyValue('overflow-y')).toBe('');

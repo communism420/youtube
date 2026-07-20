@@ -2324,6 +2324,24 @@ ImprovedTube.observeAutoDubbedMenu = function () {
 	if (!playerContainer) return;
 
 	ImprovedTube.autoDubbedMenuObserver = new MutationObserver(function (records) {
+		// YouTube reuses submenu nodes. A panel marked as leaving becomes eligible
+		// again only when YouTube explicitly attaches it in a later mutation batch;
+		// moving the same subtree within one update is still part of the old panel.
+		const removedNodes = new Set();
+		records?.forEach(function (record) {
+			Array.from(record.removedNodes || []).forEach(node => removedNodes.add(node));
+		});
+		records?.forEach(function (record) {
+			Array.from(record.addedNodes || []).forEach(function (node) {
+				if (node?.nodeType !== 1 || removedNodes.has(node)) return;
+
+				if (node.matches?.('.ytp-panel-menu')) delete node.itAutoDubbedMenuLeaving;
+				node.querySelectorAll?.('.ytp-panel-menu').forEach(function (panel) {
+					delete panel.itAutoDubbedMenuLeaving;
+				});
+			});
+		});
+
 		// Layout probes are mounted under the player briefly. They are not a
 		// YouTube menu update and must not schedule another probe recursively.
 		const relevantUpdate = records?.some(function (record) {
@@ -2385,6 +2403,18 @@ ImprovedTube.isAutoDubbedMenuLayoutProbe = function (node) {
 	);
 };
 
+ImprovedTube.releaseAutoDubbedMenuLayout = function (panel) {
+	if (!panel) return;
+
+	// YouTube adds the outgoing animation class about 20 ms after Back. Mark the
+	// audio panel immediately so observer callbacks in that gap cannot make it
+	// reclaim the popup and constrain the root panel's native measurement.
+	panel.itAutoDubbedMenuLeaving = true;
+	ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
+	ImprovedTube.restoreAutoDubbedMenuLayout(panel, {force: true});
+	if (ImprovedTube.autoDubbedMenuPanel === panel) ImprovedTube.autoDubbedMenuPanel = null;
+};
+
 ImprovedTube.restoreAutoDubbedMenuBeforeBack = function (event) {
 	const backControl = event.target?.closest?.('.ytp-panel-back-button, .ytp-panel-title');
 	const panel = ImprovedTube.autoDubbedMenuPanel;
@@ -2393,14 +2423,29 @@ ImprovedTube.restoreAutoDubbedMenuBeforeBack = function (event) {
 
 	// Run in the capture phase so YouTube measures the root menu only after the
 	// compact audio-menu constraints have been removed.
-	ImprovedTube.cancelAutoDubbedMenuLayoutRefresh();
-	ImprovedTube.restoreAutoDubbedMenuLayout(panel);
-	ImprovedTube.autoDubbedMenuPanel = null;
+	ImprovedTube.releaseAutoDubbedMenuLayout(panel);
 };
 
-ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
+ImprovedTube.restoreAutoDubbedMenuBeforePanelFocus = function (event) {
+	const focusedPanel = event.target?.closest?.('.ytp-panel');
+	if (!focusedPanel) return;
+
+	// The same audio panel object can be detached and reused on a later opening.
+	// Focus is moved to it before YouTube measures it, so it is safe to release
+	// the marker here even in variants that reparent rather than re-create nodes.
+	const focusedMenu = focusedPanel.querySelector?.('.ytp-panel-menu');
+	if (focusedMenu?.itAutoDubbedMenuLeaving === true) delete focusedMenu.itAutoDubbedMenuLeaving;
+
+	const panel = ImprovedTube.autoDubbedMenuPanel;
+	if (panel && panel.closest?.('.ytp-panel') !== focusedPanel) {
+		ImprovedTube.releaseAutoDubbedMenuLayout(panel);
+	}
+};
+
+ImprovedTube.restoreAutoDubbedMenuLayout = function (panel, options) {
 	if (!panel) return;
 
+	const force = options?.force === true;
 	const menuPanel = panel.closest?.('.ytp-panel');
 	const settingsMenu = menuPanel?.closest?.('.ytp-settings-menu');
 	// YouTube detaches the old submenu at the end of its slide transition. Keep
@@ -2418,7 +2463,9 @@ ImprovedTube.restoreAutoDubbedMenuLayout = function (panel) {
 			for (const property in styles) {
 				const value = styles[property];
 				const appliedValue = applied?.[property];
-				if (appliedValue && (
+				// Late observer cleanup preserves dimensions YouTube has already set
+				// for the root menu; capture cleanup runs before those values exist.
+				if (!force && appliedValue && (
 					element.style.getPropertyValue(property) !== appliedValue.value ||
 					element.style.getPropertyPriority(property) !== appliedValue.priority
 				)) continue;
@@ -2603,6 +2650,7 @@ ImprovedTube.applyFilteredAudioMenuLayout = function (panel) {
 	[panel, menuPanel, settingsMenu].filter(Boolean).forEach(element => layoutElements.add(element));
 	panel.itAutoDubbedMenuLayoutElements = Array.from(layoutElements);
 	menuPanel.addEventListener?.('click', ImprovedTube.restoreAutoDubbedMenuBeforeBack, true);
+	settingsMenu?.addEventListener?.('focusin', ImprovedTube.restoreAutoDubbedMenuBeforePanelFocus, true);
 
 	// The inner table can retain the height and overflow of the unfiltered audio
 	// list even after its rows are hidden. That stale box is what leaves the
@@ -2720,12 +2768,11 @@ ImprovedTube.getAutoDubbedAudioMenuPanel = function () {
 	let activeIntersection = 0;
 	let activeIntersectionRatio = 0;
 
+	// Rank every settings panel before checking its contents. During Back,
+	// YouTube can keep the old audio panel in the DOM after the root panel is
+	// already visible; that stale panel must not reclaim the shared popup.
 	for (const panel of panels) {
-		const items = panel.querySelectorAll('.ytp-menuitem');
-		const containsAutoDubbedSection = Array.from(items).some(function (item) {
-			return item.classList.contains('ytp-menuitem-section-header') && ImprovedTube.isAutoDubbedMenuHeader(item);
-		});
-		if (!containsAutoDubbedSection) continue;
+		if (panel.itAutoDubbedMenuLeaving === true) continue;
 
 		const layoutPanel = panel.closest?.('.ytp-panel') || panel;
 		// These classes make an outgoing panel transparent and translate it away.
@@ -2753,7 +2800,14 @@ ImprovedTube.getAutoDubbedAudioMenuPanel = function () {
 		}
 	}
 
-	return activePanel;
+	if (!activePanel) return null;
+
+	const items = activePanel.querySelectorAll('.ytp-menuitem');
+	const containsAutoDubbedSection = Array.from(items).some(function (item) {
+		return item.classList.contains('ytp-menuitem-section-header') && ImprovedTube.isAutoDubbedMenuHeader(item);
+	});
+
+	return containsAutoDubbedSection ? activePanel : null;
 };
 
 ImprovedTube.hideAutoDubbedMenuItems = function () {
